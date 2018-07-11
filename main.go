@@ -350,7 +350,7 @@ func emergencyScale(hpa HpaInfo) error {
 	out.Spec.Replicas = func(i int32) *int32 {
 		return &i
 	}(hpa.currentReplicas * multiplySpec)
-	_, err := cli.Update(out)
+	_, err = cli.Update(out)
 	if err != nil {
 		return err
 	}
