@@ -340,7 +340,10 @@ func validateScale(hpa HpaInfo) bool {
 
 func emergencyScale(hpa HpaInfo) error {
 	cli := client.AppsV1beta2().Deployments(hpa.namespace)
-	out, _ := cli.Get(hpa.refName, meta_v1.GetOptions{})
+	out, err := cli.Get(hpa.refName, meta_v1.GetOptions{})
+	if err != nil {
+		return err
+	}
 	out.Spec.Replicas = func(i int32) *int32 {
 		return &i
 	}(hpa.currentReplicas * multiplySpec)
