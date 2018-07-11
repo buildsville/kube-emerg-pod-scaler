@@ -320,7 +320,10 @@ func validateScale(hpa HpaInfo) bool {
 		FieldSelector: "involvedObject.kind=Deployment,reason=ScalingReplicaSet,involvedObject.name=" + hpa.refName,
 	}
 	cli := client.CoreV1().Events(hpa.namespace)
-	out, _ := cli.List(opt)
+	out, err := cli.List(opt)
+	if err != nil{
+			panic(err)
+	}
 	var lastScaleUpTime meta_v1.Time
 	reg := regexp.MustCompile(`^Scaled up`)
 	for _, e := range out.Items {
