@@ -170,7 +170,7 @@ func (c *Controller) processItem(ev Event) error {
 		//起動時に取得する既存のlistは出力させない
 		if ev.send && objectMeta.CreationTimestamp.Sub(serverStartTime).Seconds() > 0 {
 			fmt.Println("detect FailedGetResourceMetric (create)")
-			fmt.Println("execute scale")
+			fmt.Printf("execute scale %v to %v\n",hpaInfo.currentReplicas,hpaInfo.currentReplicas * multiplySpec)
 			err := emergencyScale(hpaInfo)
 			if err != nil {
 				return err
@@ -333,7 +333,7 @@ func validateScale(hpa HpaInfo) bool {
 	}
 	lastUpdateBefore := time.Now().Local().Unix() - lastScaleUpTime.Unix()
 	if lastUpdateBefore > lastUpdateBorderSec {
-		fmt.Println("execute scale")
+		fmt.Printf("execute scale %v to %v\n",hpa.currentReplicas,hpa.currentReplicas * multiplySpec)
 		return true
 	} else {
 		fmt.Printf("not execute scale since last scale was %v seconds before\n", lastUpdateBefore)
