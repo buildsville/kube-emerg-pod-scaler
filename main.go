@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"github.com/mitchellh/go-homedir"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -148,7 +150,7 @@ func (c *Controller) processNextItem() bool {
 func (c *Controller) processItem(ev Event) error {
 	obj, _, err := c.indexer.GetByKey(ev.key)
 	if err != nil {
-		fmt.Printf("Fetching object with key %s from store failed with %v", ev.key, err)
+		glog.Errorf("Fetching object with key %s from store failed with %v", ev.key, err)
 		return err
 	}
 
@@ -159,7 +161,7 @@ func (c *Controller) processItem(ev Event) error {
 	hpaInfo := getHpaInfo(assertedObj)
 
 	if hpaInfo.refKind != "Deployment" {
-		fmt.Println("Emergency scale supports only Deployment")
+		glog.Warningln("Emergency scale supports only Deployment")
 		return nil
 	}
 
@@ -169,8 +171,8 @@ func (c *Controller) processItem(ev Event) error {
 		//createならスケール実行する
 		//起動時に取得する既存のlistは出力させない
 		if ev.send && objectMeta.CreationTimestamp.Sub(serverStartTime).Seconds() > 0 {
-			fmt.Println("detect FailedGetResourceMetric (create)")
-			fmt.Printf("execute scale %v to %v\n",hpaInfo.currentReplicas,hpaInfo.currentReplicas * multiplySpec)
+			glog.Infoln("detect FailedGetResourceMetric (create)")
+			glog.Infof("execute scale %v to %v\n", hpaInfo.currentReplicas, hpaInfo.currentReplicas*multiplySpec)
 			err := emergencyScale(hpaInfo)
 			if err != nil {
 				return err
@@ -180,8 +182,8 @@ func (c *Controller) processItem(ev Event) error {
 	case "MODIFIED":
 		//updateでスケール実行の場合はわりとしっかりフィルタが必要そう（暴走によるスケール地獄が怖い…）
 		//不定期に起こる謎のupdateを排除するためlastTimestampから1分未満の時だけpost
-		if ev.send && time.Now().Local().Unix() - assertedObj.LastTimestamp.Unix() < 60 {
-			fmt.Println("detect FailedGetResourceMetric (update)")
+		if ev.send && time.Now().Local().Unix()-assertedObj.LastTimestamp.Unix() < 60 {
+			glog.Infoln("detect FailedGetResourceMetric (update)")
 			if validateScale(hpaInfo) {
 				err := emergencyScale(hpaInfo)
 				if err != nil {
@@ -205,20 +207,20 @@ func (c *Controller) handleErr(err error, key interface{}) {
 	}
 
 	if c.queue.NumRequeues(key) < maxRetries {
-		fmt.Printf("Error syncing Event %v: %v", key, err)
+		glog.Errorf("Error syncing Event %v: %v", key, err)
 		c.queue.AddRateLimited(key)
 		return
 	}
 
 	c.queue.Forget(key)
 	runtime.HandleError(err)
-	fmt.Printf("Dropping Event %q out of the queue: %v", key, err)
+	glog.Infof("Dropping Event %q out of the queue: %v", key, err)
 }
 
 func (c *Controller) Run(stopCh chan struct{}) {
 	defer runtime.HandleCrash()
 	defer c.queue.ShutDown()
-	fmt.Println("Starting Event controller")
+	glog.Infoln("Starting Event controller")
 	serverStartTime = time.Now().Local()
 
 	go c.informer.Run(stopCh)
@@ -232,7 +234,7 @@ func (c *Controller) Run(stopCh chan struct{}) {
 	go wait.Until(c.runWorker, time.Second, stopCh)
 
 	<-stopCh
-	fmt.Println("Stopping Event controller")
+	glog.Infoln("Stopping Event controller")
 }
 
 func (c *Controller) runWorker() {
@@ -321,8 +323,8 @@ func validateScale(hpa HpaInfo) bool {
 	}
 	cli := client.CoreV1().Events(hpa.namespace)
 	out, err := cli.List(opt)
-	if err != nil{
-			panic(err)
+	if err != nil {
+		panic(err)
 	}
 	var lastScaleUpTime meta_v1.Time
 	reg := regexp.MustCompile(`^Scaled up`)
@@ -333,10 +335,10 @@ func validateScale(hpa HpaInfo) bool {
 	}
 	lastUpdateBefore := time.Now().Local().Unix() - lastScaleUpTime.Unix()
 	if lastUpdateBefore > lastUpdateBorderSec {
-		fmt.Printf("execute scale %v to %v\n",hpa.currentReplicas,hpa.currentReplicas * multiplySpec)
+		glog.Infof("execute scale %v to %v\n", hpa.currentReplicas, hpa.currentReplicas*multiplySpec)
 		return true
 	} else {
-		fmt.Printf("not execute scale since last scale was %v seconds before\n", lastUpdateBefore)
+		glog.Infof("not execute scale since last scale was %v seconds before\n", lastUpdateBefore)
 		return false
 	}
 }
@@ -372,9 +374,10 @@ func putEvent() error {
 }
 
 func main() {
-	fmt.Println("MULTIPLY_SPEC :", multiplySpec)
-	fmt.Println("UPDATE_BORDER_SEC :", lastUpdateBorderSec)
-	fmt.Println("POD_NAME :", podName)
-	fmt.Println("POD_NAMESPACE :", podNamespace)
+	flag.Parse()
+	glog.Infof("MULTIPLY_SPEC : %v\n", multiplySpec)
+	glog.Infof("UPDATE_BORDER_SEC : %v\n", lastUpdateBorderSec)
+	glog.Infof("POD_NAME : %v\n", podName)
+	glog.Infof("POD_NAMESPACE : %v\n", podNamespace)
 	watchStart()
 }
