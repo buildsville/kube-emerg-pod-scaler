@@ -15,4 +15,4 @@ RUN apk add --update ca-certificates
 
 COPY --from=builder /kube-emerg-pod-scaler /kube-emerg-pod-scaler
 
-ENTRYPOINT ["/kube-emerg-pod-scaler"]
+ENTRYPOINT ["/kube-emerg-pod-scaler","-logtostderr"]
