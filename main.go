@@ -28,10 +28,23 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
+/*
+使用する環境変数
+MULTIPLY_SPEC : スケール倍率
+UPDATE_BORDER_SEC : スケールしてから次スケールできるようになるまでの秒数
+UNHEALTHY_BORDER_SEC : Unhealthyなpodを検出する秒数
+UNHEALTHY_RATE_FOR_SCALE : unhealthyなpodがこの数値パーセント以下の時にはscaleしない
+UNHEALTHY_ONLY_LIVENESS : TRUEでlivenessがfailしたもののみをunhealthyとする
+POD_NAME : このpodの名前
+POD_NAMESPACE : このpodのnamespace
+*/
+
 const (
-	maxRetries                 = 5
+	maxRetries                 = 3
 	defaultLastUpdateBorderSec = 300
 	defaultMultiplySpec        = 3
+	defaultUnhealthyBorderSec  = 180
+	defaultUnhealthyRateForScale = 50
 	defaultPodName             = "kube-emerg-pod-scaler"
 	defaultPodNamespace        = "default"
 )
@@ -51,6 +64,24 @@ var lastUpdateBorderSec = func() int64 {
 		return i
 	} else {
 		return defaultLastUpdateBorderSec
+	}
+}()
+
+var unhealthyBorderSec = func() int64 {
+	i, err := strconv.ParseInt(os.Getenv("UNHEALTHY_BORDER_SEC"), 10, 64)
+	if err == nil {
+		return i
+	} else {
+		return defaultUnhealthyBorderSec
+	}
+}()
+
+var unhealthyRateForScale = func() int32 {
+	i, err := strconv.ParseInt(os.Getenv("UNHEALTHY_RATE_FOR_SCALE"), 10, 32)
+	if err == nil {
+		return int32(i)
+	} else {
+		return defaultUnhealthyRateForScale
 	}
 }()
 
@@ -171,11 +202,12 @@ func (c *Controller) processItem(ev Event) error {
 		//createならスケール実行する
 		//起動時に取得する既存のlistは出力させない
 		if ev.send && objectMeta.CreationTimestamp.Sub(serverStartTime).Seconds() > 0 {
-			glog.Infoln("detect FailedGetResourceMetric (create)")
-			glog.Infof("execute scale %v to %v\n", hpaInfo.currentReplicas, hpaInfo.currentReplicas*multiplySpec)
-			err := emergencyScale(hpaInfo)
-			if err != nil {
-				return err
+			glog.Infoln("detect FailedComputeMetricsReplicas (create)")
+			if validateScale(hpaInfo) {
+				err := emergencyScale(hpaInfo)
+				if err != nil {
+					return err
+				}
 			}
 			return nil
 		}
@@ -183,7 +215,7 @@ func (c *Controller) processItem(ev Event) error {
 		//updateでスケール実行の場合はわりとしっかりフィルタが必要そう（暴走によるスケール地獄が怖い…）
 		//不定期に起こる謎のupdateを排除するためlastTimestampから1分未満の時だけpost
 		if ev.send && time.Now().Local().Unix()-assertedObj.LastTimestamp.Unix() < 60 {
-			glog.Infoln("detect FailedGetResourceMetric (update)")
+			glog.Infoln("detect FailedComputeMetricsReplicas (update)")
 			if validateScale(hpaInfo) {
 				err := emergencyScale(hpaInfo)
 				if err != nil {
@@ -245,7 +277,7 @@ func (c *Controller) runWorker() {
 func hpaFailedSelect() fields.Selector {
 	var selectors []fields.Selector
 	selectors = append(selectors, fields.OneTermEqualSelector("involvedObject.kind", "HorizontalPodAutoscaler"))
-	selectors = append(selectors, fields.OneTermEqualSelector("reason", "FailedGetResourceMetric"))
+	selectors = append(selectors, fields.OneTermEqualSelector("reason", "FailedComputeMetricsReplicas"))
 	return fields.AndSelectors(selectors...)
 }
 
@@ -318,6 +350,35 @@ func getHpaInfo(event *v1.Event) HpaInfo {
 //updateの場合にやるかどうかを判定する
 //直近x分以内に対象DeploymentにScalingReplicaSetのScaled upイベントが起こったかどうかとか
 func validateScale(hpa HpaInfo) bool {
+	lastScaleUpTime := getLastScaleUpTime(hpa)
+	lastUpdateBefore := time.Now().Local().Unix() - lastScaleUpTime.Unix()
+	glog.Infof("last update time : %v\n", lastScaleUpTime)
+	if lastUpdateBefore < lastUpdateBorderSec {
+		glog.Infof("not execute scale since last scale was %v seconds before\n", lastUpdateBefore)
+		return false
+	}
+
+	unhealthyEvent := getUnhealthyEvents(hpa.namespace)
+	unhealthyEvent = filterEventByName(unhealthyEvent,hpa.refName)
+	if os.Getenv("UNHEALTHY_ONLY_LIVENESS") == "TRUE" {
+		unhealthyEvent = filterEventOnlyLivenessFail(unhealthyEvent)
+	}
+	unhealthyEvent = filterEventByTime(unhealthyEvent,unhealthyBorderSec)
+	unhealthyPodCount := itemsUniqPodCount(unhealthyEvent)
+	unhealthyPodPercentage := 100 * unhealthyPodCount / hpa.currentReplicas
+	glog.Infof("unhealthy pod : %v\n", unhealthyPodCount)
+	glog.Infof("current replicas : %v\n", hpa.currentReplicas)
+	glog.Infof("unhealthy pod percentage : %v\n", unhealthyPodPercentage)
+	if unhealthyPodPercentage < unhealthyRateForScale {
+		glog.Infof("not execute scale since unhealthy pod percentage (%v%%) is below border for scale (%v%%)\n", unhealthyPodPercentage,unhealthyRateForScale)
+		return false
+	}
+
+	glog.Infof("execute scale %v to %v\n", hpa.currentReplicas, hpa.currentReplicas*multiplySpec)
+	return true
+}
+
+func getLastScaleUpTime(hpa HpaInfo) meta_v1.Time {
 	opt := meta_v1.ListOptions{
 		FieldSelector: "involvedObject.kind=Deployment,reason=ScalingReplicaSet,involvedObject.name=" + hpa.refName,
 	}
@@ -333,14 +394,63 @@ func validateScale(hpa HpaInfo) bool {
 			lastScaleUpTime = e.LastTimestamp
 		}
 	}
-	lastUpdateBefore := time.Now().Local().Unix() - lastScaleUpTime.Unix()
-	if lastUpdateBefore > lastUpdateBorderSec {
-		glog.Infof("execute scale %v to %v\n", hpa.currentReplicas, hpa.currentReplicas*multiplySpec)
-		return true
-	} else {
-		glog.Infof("not execute scale since last scale was %v seconds before\n", lastUpdateBefore)
-		return false
+	return lastScaleUpTime
+}
+
+func getUnhealthyEvents(namespace string) []v1.Event {
+	opt := meta_v1.ListOptions{
+		FieldSelector: "type=Warning,reason=Unhealthy",
 	}
+	cli := client.CoreV1().Events(namespace)
+	out, err := cli.List(opt)
+	if err != nil {
+		panic(err)
+	}
+	return out.Items
+}
+
+func filterEventByName(events []v1.Event, name string) []v1.Event {
+  var ret []v1.Event
+  r := regexp.MustCompile(`^` + name)
+  for _, e := range events {
+    if r.MatchString(e.InvolvedObject.Name) {
+      ret = append(ret,e)
+    }
+  }
+  return ret
+}
+
+func filterEventOnlyLivenessFail(events []v1.Event) []v1.Event {
+  var ret []v1.Event
+  r := regexp.MustCompile(`^Liveness`)
+  for _, e := range events {
+    if r.MatchString(e.Message) {
+      ret = append(ret,e)
+    }
+  }
+  return ret
+}
+
+//lasttimestampがsec秒以内のeventだけを返す
+func filterEventByTime(events []v1.Event, sec int64) []v1.Event {
+  var ret []v1.Event
+  for _, e := range events {
+    if time.Now().Local().Unix() - e.LastTimestamp.Unix() < sec {
+      ret = append(ret,e)
+    }
+  }
+  return ret
+}
+
+func itemsUniqPodCount(events []v1.Event) int32 {
+  var uniq = map[string]bool{}
+  for _, e := range events {
+    p := e.InvolvedObject.Name
+    if !uniq[p] {
+      uniq[p] = true
+    }
+  }
+  return int32(len(uniq))
 }
 
 func emergencyScale(hpa HpaInfo) error {
@@ -379,5 +489,12 @@ func main() {
 	glog.Infof("UPDATE_BORDER_SEC : %v\n", lastUpdateBorderSec)
 	glog.Infof("POD_NAME : %v\n", podName)
 	glog.Infof("POD_NAMESPACE : %v\n", podNamespace)
+	glog.Infof("UNHEALTHY_BORDER_SEC  : %v\n", unhealthyBorderSec)
+	glog.Infof("UNHEALTHY_RATE_FOR_SCALE  : %v\n", unhealthyRateForScale)
+	if os.Getenv("UNHEALTHY_ONLY_LIVENESS") == "TRUE" {
+		glog.Infoln("UNHEALTHY_ONLY_LIVENESS  : TRUE")
+	} else {
+		glog.Infoln("UNHEALTHY_ONLY_LIVENESS  : FALSE")
+	}
 	watchStart()
 }
