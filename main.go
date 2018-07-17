@@ -40,13 +40,13 @@ POD_NAMESPACE : このpodのnamespace
 */
 
 const (
-	maxRetries                 = 3
-	defaultLastUpdateBorderSec = 300
-	defaultMultiplySpec        = 3
-	defaultUnhealthyBorderSec  = 180
+	maxRetries                   = 3
+	defaultLastUpdateBorderSec   = 300
+	defaultMultiplySpec          = 3
+	defaultUnhealthyBorderSec    = 180
 	defaultUnhealthyRateForScale = 50
-	defaultPodName             = "kube-emerg-pod-scaler"
-	defaultPodNamespace        = "default"
+	defaultPodName               = "kube-emerg-pod-scaler"
+	defaultPodNamespace          = "default"
 )
 
 var multiplySpec = func() int32 {
@@ -359,18 +359,18 @@ func validateScale(hpa HpaInfo) bool {
 	}
 
 	unhealthyEvent := getUnhealthyEvents(hpa.namespace)
-	unhealthyEvent = filterEventByName(unhealthyEvent,hpa.refName)
+	unhealthyEvent = filterEventByName(unhealthyEvent, hpa.refName)
 	if os.Getenv("UNHEALTHY_ONLY_LIVENESS") == "TRUE" {
 		unhealthyEvent = filterEventOnlyLivenessFail(unhealthyEvent)
 	}
-	unhealthyEvent = filterEventByTime(unhealthyEvent,unhealthyBorderSec)
+	unhealthyEvent = filterEventByTime(unhealthyEvent, unhealthyBorderSec)
 	unhealthyPodCount := itemsUniqPodCount(unhealthyEvent)
 	unhealthyPodPercentage := 100 * unhealthyPodCount / hpa.currentReplicas
 	glog.Infof("unhealthy pod : %v\n", unhealthyPodCount)
 	glog.Infof("current replicas : %v\n", hpa.currentReplicas)
 	glog.Infof("unhealthy pod percentage : %v\n", unhealthyPodPercentage)
 	if unhealthyPodPercentage < unhealthyRateForScale {
-		glog.Infof("not execute scale since unhealthy pod percentage (%v%%) is below border for scale (%v%%)\n", unhealthyPodPercentage,unhealthyRateForScale)
+		glog.Infof("not execute scale since unhealthy pod percentage (%v%%) is below border for scale (%v%%)\n", unhealthyPodPercentage, unhealthyRateForScale)
 		return false
 	}
 
@@ -410,47 +410,47 @@ func getUnhealthyEvents(namespace string) []v1.Event {
 }
 
 func filterEventByName(events []v1.Event, name string) []v1.Event {
-  var ret []v1.Event
-  r := regexp.MustCompile(`^` + name)
-  for _, e := range events {
-    if r.MatchString(e.InvolvedObject.Name) {
-      ret = append(ret,e)
-    }
-  }
-  return ret
+	var ret []v1.Event
+	r := regexp.MustCompile(`^` + name)
+	for _, e := range events {
+		if r.MatchString(e.InvolvedObject.Name) {
+			ret = append(ret, e)
+		}
+	}
+	return ret
 }
 
 func filterEventOnlyLivenessFail(events []v1.Event) []v1.Event {
-  var ret []v1.Event
-  r := regexp.MustCompile(`^Liveness`)
-  for _, e := range events {
-    if r.MatchString(e.Message) {
-      ret = append(ret,e)
-    }
-  }
-  return ret
+	var ret []v1.Event
+	r := regexp.MustCompile(`^Liveness`)
+	for _, e := range events {
+		if r.MatchString(e.Message) {
+			ret = append(ret, e)
+		}
+	}
+	return ret
 }
 
 //lasttimestampがsec秒以内のeventだけを返す
 func filterEventByTime(events []v1.Event, sec int64) []v1.Event {
-  var ret []v1.Event
-  for _, e := range events {
-    if time.Now().Local().Unix() - e.LastTimestamp.Unix() < sec {
-      ret = append(ret,e)
-    }
-  }
-  return ret
+	var ret []v1.Event
+	for _, e := range events {
+		if time.Now().Local().Unix()-e.LastTimestamp.Unix() < sec {
+			ret = append(ret, e)
+		}
+	}
+	return ret
 }
 
 func itemsUniqPodCount(events []v1.Event) int32 {
-  var uniq = map[string]bool{}
-  for _, e := range events {
-    p := e.InvolvedObject.Name
-    if !uniq[p] {
-      uniq[p] = true
-    }
-  }
-  return int32(len(uniq))
+	var uniq = map[string]bool{}
+	for _, e := range events {
+		p := e.InvolvedObject.Name
+		if !uniq[p] {
+			uniq[p] = true
+		}
+	}
+	return int32(len(uniq))
 }
 
 func emergencyScale(hpa HpaInfo) error {
