@@ -1,0 +1,67 @@
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kube-emerg-pod-scaler
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get","watch","list","create","update","patch"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get","update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-emerg-pod-scaler
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-emerg-pod-scaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-emerg-pod-scaler
+subjects:
+  - kind: ServiceAccount
+    name: kube-emerg-pod-scaler
+    namespace: default
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-emerg-pod-scaler
+  namespace: default
+spec:
+  serviceAccountName: kube-emerg-pod-scaler
+  containers:
+    - image: masahata/kube-emerg-pod-scaler:latest
+      imagePullPolicy: Always
+      name: kube-emerg-pod-scaler
+      env:
+        - name: MULTIPLY_SPEC
+          value: "2"
+        - name: UPDATE_BORDER_SEC
+          value: "300"
+        - name: UNHEALTHY_BORDER_SEC
+          value: "300"
+        - name: UNHEALTHY_RATE_FOR_SCALE
+          value: "40"
+        - name: UNHEALTHY_ONLY_LIVENESS
+          value: "TRUE"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
