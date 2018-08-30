@@ -45,7 +45,7 @@ const (
 	defaultPodNamespace          = "default"
 	defaultCondFalsePctAbnormal  = 60
 	defaultCondFalsePctRegular   = 80
-	defaultRegularMonitoring     = true
+	defaultRegularMonitoring     = false
 	defaultMonitorIntervalSec    = 60
 )
 
