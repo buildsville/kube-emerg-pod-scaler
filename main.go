@@ -449,7 +449,11 @@ func itemsUniqPodCount(events []v1.Event) int {
 
 //DeploymentからPodListを取得してcondition=falseなpodを取得
 func conditionFalsePodInfo(deploymentName string) (int, int) {
-	allPods, _ := client.CoreV1().Pods("").List(meta_v1.ListOptions{})
+	allPods, err := client.CoreV1().Pods("").List(meta_v1.ListOptions{})
+	if err != nil {
+		glog.Errorf("Failed to get Pod list : %v", err)
+		return 0, 0
+	}
 	var pods []v1.Pod
 	var falsePods []v1.Pod
 	r := regexp.MustCompile(`^` + deploymentName)
@@ -504,6 +508,10 @@ func execRegularMonitoring(targetDeployments string) {
 	targets := strings.Split(targetDeployments, ",")
 	for _, d := range targets {
 		allPods, falsePods := conditionFalsePodInfo(d)
+		if allPods == 0 {
+			glog.Errorf("pods of %v is zero",d)
+			continue
+		}
 		conditionFalsePodPercentage := 100 * falsePods / allPods
 		glog.Infof("regular monitoring : Deployment = %v, AllPodCount = %v, ConditionFalsePodCount = %v, ConditionFalsePercentage = %v", d, allPods, falsePods, conditionFalsePodPercentage)
 		if conditionFalsePodPercentage > *condFalsePctRegular {
