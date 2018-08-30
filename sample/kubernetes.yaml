@@ -35,33 +35,36 @@ subjects:
     name: kube-emerg-pod-scaler
     namespace: default
 ---
-apiVersion: v1
-kind: Pod
+apiVersion: extensions/v1beta1
+kind: Deployment
 metadata:
   name: kube-emerg-pod-scaler
   namespace: default
 spec:
-  serviceAccountName: kube-emerg-pod-scaler
-  containers:
-    - image: masahata/kube-emerg-pod-scaler:latest
-      imagePullPolicy: Always
+  replicas: 1
+  template:
+    metadata:
       name: kube-emerg-pod-scaler
-      env:
-        - name: MULTIPLY_SPEC
-          value: "2"
-        - name: UPDATE_BORDER_SEC
-          value: "300"
-        - name: UNHEALTHY_BORDER_SEC
-          value: "300"
-        - name: UNHEALTHY_RATE_FOR_SCALE
-          value: "40"
-        - name: UNHEALTHY_ONLY_LIVENESS
-          value: "TRUE"
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
+      labels:
+        app: kube-emerg-pod-scaler
+    spec:
+      serviceAccountName: kube-emerg-pod-scaler
+      containers:
+        - image: masahata/kube-emerg-pod-scaler:latest
+          imagePullPolicy: Always
+          name: kube-emerg-pod-scaler
+          args:
+            - "-unhealthyBorderSec=300"
+            - "-unhealthyRateForScale=60"
+            - "-regularMonitoring=true"
+            - "-regularMonitorTarget=my-deployment1,my-deployment2"
+            - "-monitorIntervalSec=120"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
