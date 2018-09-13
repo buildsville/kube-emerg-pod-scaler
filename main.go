@@ -167,7 +167,11 @@ func (c *Controller) processItem(ev Event) error {
 	if !ok {
 		return nil
 	}
-	hpaInfo := getHpaInfo(assertedObj)
+	hpaInfo, err := getHpaInfo(assertedObj)
+	if err != nil {
+		glog.Errorf("Error on get HPA info : %v", err)
+		return nil
+	}
 
 	if hpaInfo.refKind != "Deployment" {
 		glog.Warningln("Emergency scale supports only Deployment")
@@ -310,12 +314,12 @@ func resourceEventHandlerFuncs(queue workqueue.RateLimitingInterface) cache.Reso
 	}
 }
 
-func getHpaInfo(event *v1.Event) HpaInfo {
+func getHpaInfo(event *v1.Event) (HpaInfo, error) {
 	ns := event.ObjectMeta.Namespace
 	name := event.InvolvedObject.Name
 	out, err := client.AutoscalingV1().HorizontalPodAutoscalers(ns).Get(name, meta_v1.GetOptions{})
 	if err != nil {
-		panic(err)
+		return HpaInfo{}, err
 	}
 	return HpaInfo{
 		name:            name,
@@ -323,7 +327,7 @@ func getHpaInfo(event *v1.Event) HpaInfo {
 		refName:         out.Spec.ScaleTargetRef.Name,
 		namespace:       out.ObjectMeta.Namespace,
 		currentReplicas: int(out.Status.CurrentReplicas),
-	}
+	}, nil
 }
 
 //updateの場合にやるかどうかを判定する
@@ -371,15 +375,16 @@ func validateScale(hpa HpaInfo) bool {
 //DeploymentやHPAにはスケールした時間の記録がない（？）のでイベントから取る
 //なのでイベントが期限切れで消えていたらゼロ値が返る
 func getLastScaleUpTime(hpa HpaInfo) meta_v1.Time {
+	var lastScaleUpTime meta_v1.Time
 	opt := meta_v1.ListOptions{
 		FieldSelector: "involvedObject.kind=Deployment,reason=ScalingReplicaSet,involvedObject.name=" + hpa.refName,
 	}
 	cli := client.CoreV1().Events(hpa.namespace)
 	out, err := cli.List(opt)
 	if err != nil {
-		panic(err)
+		glog.Error(err)
+		return lastScaleUpTime
 	}
-	var lastScaleUpTime meta_v1.Time
 	reg := regexp.MustCompile(`^Scaled up`)
 	for _, e := range out.Items {
 		if lastScaleUpTime.Before(&e.LastTimestamp) && reg.MatchString(e.Message) {
@@ -396,7 +401,8 @@ func getUnhealthyEvents(namespace string) []v1.Event {
 	cli := client.CoreV1().Events(namespace)
 	out, err := cli.List(opt)
 	if err != nil {
-		panic(err)
+		glog.Error(err)
+		return []v1.Event{}
 	}
 	return out.Items
 }
@@ -463,9 +469,9 @@ func conditionFalsePodInfo(deploymentName string) (int, int) {
 		}
 	}
 	for _, p := range pods {
-		//pod内のコンテナどれかひとつがダメならfault
+		//type:readyのstatusがfalseな場合falsePods入り
 		for _, c := range p.Status.Conditions {
-			if c.Status == v1.ConditionFalse {
+			if c.Type == v1.PodReady && c.Status == v1.ConditionFalse {
 				falsePods = append(falsePods, p)
 			}
 		}
@@ -509,7 +515,7 @@ func execRegularMonitoring(targetDeployments string) {
 	for _, d := range targets {
 		allPods, falsePods := conditionFalsePodInfo(d)
 		if allPods == 0 {
-			glog.Errorf("pods of %v is zero",d)
+			glog.Errorf("pods of %v is zero", d)
 			continue
 		}
 		conditionFalsePodPercentage := 100 * falsePods / allPods
