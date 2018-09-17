@@ -361,7 +361,6 @@ func validateScale(hpa HpaInfo) bool {
 		if conditionFalsePodPercentage < *condFalsePctAbnormal {
 			glog.Infof("not execute scale since conditionFalse pod percentage (%v%%) is below border for scale (%v%%)\n", conditionFalsePodPercentage, *condFalsePctAbnormal)
 			glog.Infof("try next evaluation\n")
-			return false
 		} else {
 			glog.Infof("execute scale %v to %v\n", hpa.currentReplicas, hpa.currentReplicas**multiplySpec)
 			return true
@@ -522,7 +521,11 @@ func execRegularMonitoring(targetDeployments string) {
 		glog.Infof("regular monitoring : Deployment = %v, AllPodCount = %v, ConditionFalsePodCount = %v, ConditionFalsePercentage = %v", d, allPods, falsePods, conditionFalsePodPercentage)
 		if conditionFalsePodPercentage > *condFalsePctRegular {
 			glog.Infof("ConditionFalsePercentage exceeds border\n")
-			hpa := getHpaInfoFromDeploymentName(d)
+			hpa, err := getHpaInfoFromDeploymentName(d)
+			if err != nil {
+				glog.Errorf("Failed to get HPA list : %v", err)
+				continue
+			}
 			//前回のscale判定
 			if validateLastScaleTime(hpa) {
 				//scaleする処理
@@ -536,12 +539,11 @@ func execRegularMonitoring(targetDeployments string) {
 	}
 }
 
-func getHpaInfoFromDeploymentName(deploymentName string) HpaInfo {
+func getHpaInfoFromDeploymentName(deploymentName string) (HpaInfo, error) {
 	var ret HpaInfo
 	out, err := client.AutoscalingV1().HorizontalPodAutoscalers("").List(meta_v1.ListOptions{})
 	if err != nil {
-		glog.Errorf("Failed to get HPA list : %v", err)
-		return ret
+		return ret, err
 	}
 	for _, h := range out.Items {
 		if h.Spec.ScaleTargetRef.Name == deploymentName {
@@ -551,10 +553,10 @@ func getHpaInfoFromDeploymentName(deploymentName string) HpaInfo {
 				refName:         h.Spec.ScaleTargetRef.Name,
 				namespace:       h.ObjectMeta.Namespace,
 				currentReplicas: int(h.Status.CurrentReplicas),
-			}
+			}, nil
 		}
 	}
-	return ret
+	return ret, fmt.Errorf("failed to get HPA. %v is not exist in HPA list", deploymentName)
 }
 
 func validateLastScaleTime(hpa HpaInfo) bool {
