@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/mitchellh/go-homedir"
 	"os"
 	"os/signal"
 	"regexp"
@@ -11,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mitchellh/go-homedir"
+
 	"github.com/golang/glog"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -47,6 +48,7 @@ const (
 	defaultCondFalsePctRegular   = 80
 	defaultRegularMonitoring     = false
 	defaultMonitorIntervalSec    = 60
+	defaultRegularJudgeByHealth  = true
 )
 
 var (
@@ -60,6 +62,7 @@ var (
 	regularMonitoring     = flag.Bool("regularMonitoring", defaultRegularMonitoring, "Whether to regular monitoring.")
 	monitorIntervalSec    = flag.Int("monitorIntervalSec", defaultMonitorIntervalSec, "Interval to regular monitoring.")
 	regularMonitorTarget  = flag.String("regularMonitorTarget", "", "Target deployment of regular monitoring.")
+	regularJudgeByHealth  = flag.Bool("regularJudgeBy", defaultRegularJudgeByHealth, "Regular monitoring judged by health or not. (use condition if false)")
 )
 
 var podName = func() string {
@@ -478,6 +481,78 @@ func conditionFalsePodInfo(deploymentName string) (int, int) {
 	return len(pods), len(falsePods)
 }
 
+//DeploymentからPodListを取得してUnhealthyイベントを起こしたpodを取得
+func conditionUnhealthPodInfo(deploymentName string) (int, int) {
+	o := meta_v1.ListOptions{
+		LabelSelector: labelSelectorStringFromDeployment(deploymentName),
+	}
+	ap, e := client.CoreV1().Pods("").List(o)
+	if e != nil {
+		glog.Errorf("Unable to get Pods list : %v", e)
+		return 0, 0
+	}
+	var unhealthyPod []v1.Pod
+	for _, p := range ap.Items {
+		if isUnhealthyPod(p) {
+			unhealthyPod = append(unhealthyPod, p)
+		}
+	}
+	return len(ap.Items), len(unhealthyPod)
+}
+
+func labelSelectorStringFromDeployment(deploymentName string) string {
+	var s []fields.Selector
+	s = append(s, fields.OneTermEqualSelector("metadata.name", deploymentName))
+	o := meta_v1.ListOptions{
+		FieldSelector: fields.AndSelectors(s...).String(),
+	}
+	dl, e := client.AppsV1().Deployments("").List(o)
+	if e != nil {
+		glog.Errorf("Unable to get Deployments list : %v", e)
+		return "dummykey=dummyvalue"
+	}
+	if len(dl.Items) == 0 {
+		glog.Errorf("can't find Deployment : %v", deploymentName)
+		return "dummykey=dummyvalue"
+	}
+	d := dl.Items[0]
+	ret := ""
+	for k, v := range d.Spec.Template.ObjectMeta.Labels {
+		if ret == "" {
+			ret = k + "=" + v
+		} else {
+			ret = ret + "," + k + "=" + v
+		}
+	}
+	if ret == "" {
+		return "dummykey=dummyvalue"
+	}
+	return ret
+}
+
+func isUnhealthyPod(pod v1.Pod) bool {
+	var s []fields.Selector
+	s = append(s, fields.OneTermEqualSelector("involvedObject.name", pod.Name))
+	s = append(s, fields.OneTermEqualSelector("type", "Warning"))
+	s = append(s, fields.OneTermEqualSelector("reason", "Unhealthy"))
+	o := meta_v1.ListOptions{
+		FieldSelector: fields.AndSelectors(s...).String(),
+	}
+	l, e := client.CoreV1().Events(pod.Namespace).List(o)
+	if e != nil {
+		glog.Errorf("Unable to get Events list : %v", e)
+		return false
+	}
+	i := filterEventByTime(l.Items, *unhealthyBorderSec)
+	if *unhealthyOnlyLiveness {
+		i = filterEventOnlyLivenessFail(i)
+	}
+	if len(i) > 0 {
+		return true
+	}
+	return false
+}
+
 func emergencyScale(hpa HpaInfo) error {
 	cli := client.AppsV1beta2().Deployments(hpa.namespace)
 	out, err := cli.Get(hpa.refName, meta_v1.GetOptions{})
@@ -512,7 +587,12 @@ func putEvent() error {
 func execRegularMonitoring(targetDeployments string) {
 	targets := strings.Split(targetDeployments, ",")
 	for _, d := range targets {
-		allPods, falsePods := conditionFalsePodInfo(d)
+		var allPods, falsePods int
+		if *regularJudgeByHealth {
+			allPods, falsePods = conditionUnhealthPodInfo(d)
+		} else {
+			allPods, falsePods = conditionFalsePodInfo(d)
+		}
 		if allPods == 0 {
 			glog.Errorf("pods of %v is zero", d)
 			continue
