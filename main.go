@@ -38,7 +38,7 @@ POD_NAMESPACE : このpodのnamespace
 const (
 	maxRetries                   = 3
 	defaultLastUpdateBorderSec   = 300
-	defaultMultiplySpec          = 3
+	defaultMultiplySpec          = 2
 	defaultUnhealthyBorderSec    = 180
 	defaultUnhealthyRateForScale = 50
 	defaultUnhealthyOnlyLiveness = true
@@ -189,7 +189,7 @@ func (c *Controller) processItem(ev Event) error {
 		if ev.send && objectMeta.CreationTimestamp.Sub(serverStartTime).Seconds() > 0 {
 			glog.Infoln("detect FailedComputeMetricsReplicas (create)")
 			if validateScale(hpaInfo) {
-				err := emergencyScale(hpaInfo)
+				err := newEmergencyScale(hpaInfo)
 				if err != nil {
 					return err
 				}
@@ -202,7 +202,7 @@ func (c *Controller) processItem(ev Event) error {
 		if ev.send && time.Now().Local().Unix()-assertedObj.LastTimestamp.Unix() < 60 {
 			glog.Infoln("detect FailedComputeMetricsReplicas (update)")
 			if validateScale(hpaInfo) {
-				err := emergencyScale(hpaInfo)
+				err := newEmergencyScale(hpaInfo)
 				if err != nil {
 					return err
 				}
@@ -553,6 +553,7 @@ func isUnhealthyPod(pod v1.Pod) bool {
 	return false
 }
 
+// Deprecated
 func emergencyScale(hpa HpaInfo) error {
 	cli := client.AppsV1beta2().Deployments(hpa.namespace)
 	out, err := cli.Get(hpa.refName, meta_v1.GetOptions{})
@@ -566,6 +567,60 @@ func emergencyScale(hpa HpaInfo) error {
 	if err != nil {
 		return err
 	}
+	err = putEvent()
+	return err
+}
+
+func newEmergencyScale(hpa HpaInfo) error {
+	cli := client.AutoscalingV2beta1().HorizontalPodAutoscalers(hpa.namespace)
+	tHpa, err := cli.Get(hpa.name, meta_v1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	cmin := tHpa.Spec.MinReplicas
+	cr := tHpa.Status.CurrentReplicas
+	tmin := cr * int32(*multiplySpec)
+	tHpa.Spec.MinReplicas = &tmin
+	glog.Infof("current min replicas: %v", *cmin)
+	glog.Infof("current current replicas: %v", cr)
+	glog.Infof("target min replicas: %v", tmin)
+	_, err = cli.Update(tHpa)
+	if err != nil {
+		return err
+	}
+
+	glog.Info("wait for scale...")
+	for {
+		nHpa, err := cli.Get(hpa.name, meta_v1.GetOptions{})
+		if err != nil {
+			glog.Error(err)
+			continue
+		}
+		glog.Infof("target replicas: %v, current replicas: %v", tmin, nHpa.Status.CurrentReplicas)
+		if nHpa.Status.CurrentReplicas >= tmin {
+			break
+		}
+		time.Sleep(10 * time.Second)
+	}
+	glog.Info("scale completed.")
+	glog.Info("restore previous min replicas.")
+
+	fHpa, err := cli.Get(hpa.name, meta_v1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	fHpa.Spec.MinReplicas = cmin
+	_, err = cli.Update(fHpa)
+	if err != nil {
+		return err
+	}
+
+	eHpa, err := cli.Get(hpa.name, meta_v1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	glog.Infof("finish restore for min replicas: %v", *eHpa.Spec.MinReplicas)
+
 	err = putEvent()
 	return err
 }
@@ -610,7 +665,7 @@ func execRegularMonitoring(targetDeployments string) {
 			if validateLastScaleTime(hpa) {
 				//scaleする処理
 				glog.Infof("execute scale %v to %v\n", hpa.currentReplicas, hpa.currentReplicas**multiplySpec)
-				err := emergencyScale(hpa)
+				err := newEmergencyScale(hpa)
 				if err != nil {
 					glog.Errorf("Failed to exec emergency scale : %v", err)
 				}
