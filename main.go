@@ -48,7 +48,6 @@ const (
 	defaultCondFalsePctRegular   = 80
 	defaultRegularMonitoring     = false
 	defaultMonitorIntervalSec    = 60
-	defaultRegularJudgeByHealth  = true
 )
 
 var (
@@ -62,7 +61,6 @@ var (
 	regularMonitoring     = flag.Bool("regularMonitoring", defaultRegularMonitoring, "Whether to regular monitoring.")
 	monitorIntervalSec    = flag.Int("monitorIntervalSec", defaultMonitorIntervalSec, "Interval to regular monitoring.")
 	regularMonitorTarget  = flag.String("regularMonitorTarget", "", "Target deployment of regular monitoring.")
-	regularJudgeByHealth  = flag.Bool("regularJudgeBy", defaultRegularJudgeByHealth, "Regular monitoring judged by health or not. (use condition if false)")
 )
 
 var podName = func() string {
@@ -642,17 +640,24 @@ func putEvent() error {
 func execRegularMonitoring(targetDeployments string) {
 	targets := strings.Split(targetDeployments, ",")
 	for _, d := range targets {
-		var allPods, falsePods int
-		if *regularJudgeByHealth {
-			allPods, falsePods = conditionUnhealthPodInfo(d)
-		} else {
-			allPods, falsePods = conditionFalsePodInfo(d)
-		}
-		if allPods == 0 {
+		ua, uf := conditionUnhealthPodInfo(d)
+		fa, ff := conditionFalsePodInfo(d)
+		if ua == 0 || fa == 0 {
 			glog.Errorf("pods of %v is zero", d)
 			continue
 		}
-		conditionFalsePodPercentage := 100 * falsePods / allPods
+		ufp := 100 * uf / ua
+		ffp := 100 * ff / fa
+		var conditionFalsePodPercentage, allPods, falsePods int
+		if ufp > ffp {
+			conditionFalsePodPercentage = ufp
+			allPods = ua
+			falsePods = uf
+		} else {
+			conditionFalsePodPercentage = ffp
+			allPods = fa
+			falsePods = ff
+		}
 		glog.Infof("regular monitoring : Deployment = %v, AllPodCount = %v, ConditionFalsePodCount = %v, ConditionFalsePercentage = %v", d, allPods, falsePods, conditionFalsePodPercentage)
 		if conditionFalsePodPercentage > *condFalsePctRegular {
 			glog.Infof("ConditionFalsePercentage exceeds border\n")
